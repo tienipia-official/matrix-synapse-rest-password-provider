@@ -25,26 +25,28 @@ from typing import Tuple, Optional, Callable, Awaitable
 import requests
 import time
 import synapse
-from synapse import module_api
 from synapse.types import UserID
+from synapse.module_api import ModuleApi
 
 logger = logging.getLogger(__name__)
 
 
 class RestAuthProvider(object):
 
-    def __init__(self, config: dict, api: module_api):
-        self.account_handler = api
+    api: ModuleApi
+
+    def __init__(self, config: dict, api: ModuleApi):
+        self.api = api
 
         if not config.endpoint:
-            raise RuntimeError('Missing endpoint config')
+            raise RuntimeError("Missing endpoint config")
 
         self.endpoint = config.endpoint
         self.regLower = config.regLower
         self.config = config
 
-        logger.info('Endpoint: %s', self.endpoint)
-        logger.info('Enforce lowercase username during registration: %s', self.regLower)
+        logger.info("Endpoint: %s", self.endpoint)
+        logger.info("Enforce lowercase username during registration: %s", self.regLower)
 
         # register an auth callback handler
         # see https://matrix-org.github.io/synapse/latest/modules/password_auth_provider_callbacks.html
@@ -54,9 +56,9 @@ class RestAuthProvider(object):
             }
         )
 
-    async def check_m_login_password(self, username: str,
-                                     login_type: str,
-                                     login_dict: "synapse.module_api.JsonDict") -> Optional[
+    async def check_m_login_password(
+        self, username: str, login_type: str, login_dict: "synapse.module_api.JsonDict"
+    ) -> Optional[
         Tuple[
             str,
             Optional[Callable[["synapse.module_api.LoginResponse"], Awaitable[None]]],
@@ -66,7 +68,7 @@ class RestAuthProvider(object):
             return None
 
         # get the complete MXID
-        mxid = self.account_handler.get_qualified_user_id(username)
+        mxid = self.api.get_qualified_user_id(username)
 
         # check if the password is valid with the old function
         password_valid = await self.check_password(mxid, login_dict.get("password"))
@@ -78,8 +80,10 @@ class RestAuthProvider(object):
 
     async def check_password(self, user_id, password):
         logger.info("Got password check for " + user_id)
-        data = {'user': {'id': user_id, 'password': password}}
-        r = requests.post(self.endpoint + '/_matrix-internal/identity/v1/check_credentials', json=data)
+        data = {"user": {"id": user_id, "password": password}}
+        r = requests.post(
+            self.endpoint + "/_matrix-internal/identity/v1/check_credentials", json=data
+        )
         r.raise_for_status()
         r = r.json()
         if not r["auth"]:
@@ -98,16 +102,21 @@ class RestAuthProvider(object):
         logger.info("User %s authenticated", user_id)
 
         registration = False
-        if not (await self.account_handler.check_user_exists(user_id)):
+        if not (await self.api.check_user_exists(user_id)):
             logger.info("User %s does not exist yet, creating...", user_id)
 
             if localpart != localpart.lower() and self.regLower:
-                logger.info('User %s was cannot be created due to username lowercase policy', localpart)
+                logger.info(
+                    "User %s was cannot be created due to username lowercase policy",
+                    localpart,
+                )
                 return False
 
-            user_id, access_token = (await self.account_handler.register(localpart=localpart))
+            user_id = await self.api.register_user(localpart=localpart)
             registration = True
-            logger.info("Registration based on REST data was successful for %s", user_id)
+            logger.info(
+                "Registration based on REST data was successful for %s", user_id
+            )
         else:
             logger.info("User %s already exists, registration skipped", user_id)
 
@@ -115,16 +124,25 @@ class RestAuthProvider(object):
             logger.info("Handling profile data")
             profile = auth["profile"]
 
-            store = self.account_handler._hs.get_profile_handler().store
+            store = self.api._hs.get_profile_handler().store
 
-            if "display_name" in profile and ((registration and self.config.setNameOnRegister) or (self.config.setNameOnLogin)):
+            if "display_name" in profile and (
+                (registration and self.config.setNameOnRegister)
+                or (self.config.setNameOnLogin)
+            ):
                 display_name = profile["display_name"]
-                logger.info("Setting display name to '%s' based on profile data", display_name)
-                await store.set_profile_displayname(types_user_id, display_name)
+                logger.info(
+                    "Setting display name to '%s' based on profile data", display_name
+                )
+                await self.api.set_displayname(
+                    user_id=types_user_id, new_displayname=display_name
+                )
             else:
-                logger.info("Display name was not set because it was not given or policy restricted it")
+                logger.info(
+                    "Display name was not set because it was not given or policy restricted it"
+                )
 
-            if (self.config.updateThreepid):
+            if self.config.updateThreepid:
                 if "three_pids" in profile:
                     logger.info("Handling 3PIDs")
 
@@ -133,31 +151,32 @@ class RestAuthProvider(object):
                         medium = threepid["medium"].lower()
                         address = threepid["address"].lower()
                         external_3pids.append({"medium": medium, "address": address})
-                        logger.info("Looking for 3PID %s:%s in user profile", medium, address)
+                        logger.info(
+                            "Looking for 3PID %s:%s in user profile", medium, address
+                        )
 
                         validated_at = time_msec()
                         if not (await store.get_user_id_by_threepid(medium, address)):
                             logger.info("3PID is not present, adding")
                             await store.user_add_threepid(
-                                user_id,
-                                medium,
-                                address,
-                                validated_at,
-                                validated_at
+                                user_id, medium, address, validated_at, validated_at
                             )
                         else:
                             logger.info("3PID is present, skipping")
 
-                    if (self.config.replaceThreepid):
-                        for threepid in (await store.user_get_threepids(user_id)):
+                    if self.config.replaceThreepid:
+                        for threepid in await store.user_get_threepids(user_id):
                             medium = threepid.medium.lower()
                             address = threepid.address.lower()
-                            if {"medium": medium, "address": address} not in external_3pids:
-                                logger.info("3PID is not present in external datastore, deleting")
+                            if {
+                                "medium": medium,
+                                "address": address,
+                            } not in external_3pids:
+                                logger.info(
+                                    "3PID is not present in external datastore, deleting"
+                                )
                                 await store.user_delete_threepid(
-                                    user_id,
-                                    medium,
-                                    address
+                                    user_id, medium, address
                                 )
 
             else:
@@ -173,7 +192,7 @@ class RestAuthProvider(object):
         _require_keys(config, ["endpoint"])
 
         class _RestConfig(object):
-            endpoint = ''
+            endpoint = ""
             regLower = True
             setNameOnRegister = True
             setNameOnLogin = False
@@ -184,7 +203,9 @@ class RestAuthProvider(object):
         rest_config.endpoint = config["endpoint"]
 
         try:
-            rest_config.regLower = config['policy']['registration']['username']['enforceLowercase']
+            rest_config.regLower = config["policy"]["registration"]["username"][
+                "enforceLowercase"
+            ]
         except TypeError:
             # we don't care
             pass
@@ -193,7 +214,9 @@ class RestAuthProvider(object):
             pass
 
         try:
-            rest_config.setNameOnRegister = config['policy']['registration']['profile']['name']
+            rest_config.setNameOnRegister = config["policy"]["registration"]["profile"][
+                "name"
+            ]
         except TypeError:
             # we don't care
             pass
@@ -202,7 +225,7 @@ class RestAuthProvider(object):
             pass
 
         try:
-            rest_config.setNameOnLogin = config['policy']['login']['profile']['name']
+            rest_config.setNameOnLogin = config["policy"]["login"]["profile"]["name"]
         except TypeError:
             # we don't care
             pass
@@ -211,7 +234,7 @@ class RestAuthProvider(object):
             pass
 
         try:
-            rest_config.updateThreepid = config['policy']['all']['threepid']['update']
+            rest_config.updateThreepid = config["policy"]["all"]["threepid"]["update"]
         except TypeError:
             # we don't care
             pass
@@ -220,7 +243,7 @@ class RestAuthProvider(object):
             pass
 
         try:
-            rest_config.replaceThreepid = config['policy']['all']['threepid']['replace']
+            rest_config.replaceThreepid = config["policy"]["all"]["threepid"]["replace"]
         except TypeError:
             # we don't care
             pass
@@ -242,6 +265,5 @@ def _require_keys(config, required):
 
 
 def time_msec():
-    """Get the current timestamp in milliseconds
-    """
+    """Get the current timestamp in milliseconds"""
     return int(time.time() * 1000)
